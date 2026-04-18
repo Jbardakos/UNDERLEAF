@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+out/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Runtime data
+*.log
+npm-debug.log*
+
+# User data (stored in ~/dark-underleaf/, not in repo)
+data/
+
+# Editor
+.vscode/
+.idea/

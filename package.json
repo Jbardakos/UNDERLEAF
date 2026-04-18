@@ -1,0 +1,69 @@
+{
+  "name": "underleaf",
+  "version": "1.0.0",
+  "description": "Underleaf — Local LaTeX IDE by Iannis Bardakos",
+  "author": "Iannis Bardakos",
+  "license": "MIT",
+  "main": "electron-main.js",
+  "scripts": {
+    "start":       "node server.js",
+    "dev":         "node --watch server.js",
+    "electron":    "electron .",
+    "build:mac":   "electron-builder --mac",
+    "build:win":   "electron-builder --win",
+    "build:all":   "electron-builder --mac --win",
+    "pack":        "electron-builder --dir"
+  },
+  "dependencies": {
+    "archiver":  "^6.0.1",
+    "chokidar":  "^3.6.0",
+    "express":   "^4.18.2",
+    "fs-extra":  "^11.2.0",
+    "multer":    "^1.4.5-lts.1",
+    "uuid":      "^9.0.1",
+    "ws":        "^8.16.0"
+  },
+  "devDependencies": {
+    "electron":         "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId":       "com.iannisbardakos.underleaf",
+    "productName": "Underleaf",
+    "copyright":   "© 2026 Iannis Bardakos",
+    "asar": true,
+    "files": [
+      "electron-main.js",
+      "server.js",
+      "ai.js",
+      "public/**/*",
+      "node_modules/**/*",
+      "!node_modules/electron/**/*",
+      "!node_modules/electron-builder/**/*"
+    ],
+    "mac": {
+      "category":  "public.app-category.developer-tools",
+      "target": [
+        { "target": "dmg",  "arch": ["arm64", "x64"] },
+        { "target": "zip",  "arch": ["arm64", "x64"] }
+      ],
+      "darkModeSupport": true
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Underleaf",
+      "createDesktopShortcut": true
+    },
+    "dmg": {
+      "title":  "Underleaf",
+      "window": { "width": 540, "height": 380 }
+    }
+  }
+}
