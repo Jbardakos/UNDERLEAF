@@ -11,6 +11,65 @@ const http = require('http');
 
 let PORT = 3737;
 
+// ─── External file opening (Finder "Open With" / right-click) ─────────────────
+
+// File the OS asked us to open, captured before the window/server are ready.
+let pendingFile = null;
+
+// macOS delivers files via 'open-file' (must be registered before app is ready).
+app.on('open-file', (event, filePath) => {
+  event.preventDefault();
+  if (mainWindow) handleExternalFile(filePath);
+  else pendingFile = filePath;
+});
+
+// Pull a .tex path out of argv (Windows / CLI launches, e.g. `Underleaf foo.tex`).
+function texFromArgv(argv) {
+  return (argv || []).find(a => /\.tex$/i.test(a) && !a.startsWith('-'));
+}
+
+// POST helper to the embedded server.
+function postJson(pathname, body) {
+  return new Promise((resolve, reject) => {
+    const data = Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      host: '127.0.0.1', port: PORT, path: pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length },
+    }, (res) => {
+      let buf = '';
+      res.on('data', d => (buf += d));
+      res.on('end', () => { try { resolve(JSON.parse(buf)); } catch (e) { reject(e); } });
+    });
+    req.on('error', reject);
+    req.write(data); req.end();
+  });
+}
+
+// Register the file as an external project, then drive the renderer to open + compile it.
+async function handleExternalFile(filePath) {
+  if (!filePath || !/\.tex$/i.test(filePath)) return;
+  try {
+    const data = await postJson('/api/open-external', { path: filePath });
+    if (!data || !data.id) return;
+    const payload = JSON.stringify(data);
+    const driver = `(async () => {
+      let n = 0;
+      while (typeof window.openExternalProject !== 'function' && n < 100) {
+        await new Promise(r => setTimeout(r, 100)); n++;
+      }
+      if (typeof window.openExternalProject === 'function') window.openExternalProject(${payload});
+    })();`;
+    if (mainWindow && mainWindow.webContents) {
+      await mainWindow.webContents.executeJavaScript(driver);
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  } catch (e) {
+    // Server not ready yet — retry once the window finishes loading.
+    pendingFile = filePath;
+  }
+}
+
 async function findFreePort(start) {
   return new Promise((resolve) => {
     const srv = require('net').createServer();
@@ -100,6 +159,13 @@ async function createWindow() {
   mainWindow.once('ready-to-show', () => {
     splash.close();
     mainWindow.show();
+  });
+
+  // Once the page is loaded, open any file the OS handed us (double-click / Open With / argv).
+  mainWindow.webContents.once('did-finish-load', () => {
+    const file = pendingFile || texFromArgv(process.argv);
+    pendingFile = null;
+    if (file) handleExternalFile(file);
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

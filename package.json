@@ -32,6 +32,15 @@
     "productName": "Underleaf",
     "copyright":   "© 2026 Iannis Bardakos",
     "asar": true,
+    "fileAssociations": [
+      {
+        "ext": "tex",
+        "name": "LaTeX Document",
+        "description": "LaTeX Source",
+        "role": "Editor",
+        "rank": "Alternate"
+      }
+    ],
     "files": [
       "electron-main.js",
       "server.js",

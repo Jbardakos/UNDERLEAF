@@ -1284,6 +1284,30 @@ async function openProject(id) {
   toast(`Opened: ${S.projectName}`, 'success');
 }
 
+// Open an external .tex passed in from Finder (via Electron "Open With").
+// d = { id, name, mainFile, suggestedEngine }
+async function openExternalProject(d) {
+  try {
+    S.projectId = d.id;
+    S.projectName = d.name || d.mainFile;
+    S.tabs = []; S.activeTab = null;
+    const chip = document.getElementById('chip-name'); if (chip) chip.textContent = S.projectName;
+    if (d.suggestedEngine) {
+      const es = document.getElementById('engine-sel'); if (es) es.value = d.suggestedEngine;
+      const sb = document.getElementById('sb-eng');     if (sb) sb.textContent = d.suggestedEngine;
+    }
+    renderProjects(); renderTabs();
+    await loadFileTree();
+    await openFile(d.mainFile);
+    await compile();
+    toast('Opened ' + S.projectName, 'success');
+  } catch (e) {
+    console.error('[Underleaf] openExternalProject failed', e);
+    if (typeof toast === 'function') toast('Open failed: ' + e.message, 'error');
+  }
+}
+window.openExternalProject = openExternalProject;
+
 async function delProject(id) {
   const p = S.projects.find(x => x.id === id);
   if (!confirm(`Delete "${p?.name}"?`)) return;

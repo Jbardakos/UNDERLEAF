@@ -358,7 +358,14 @@ function broadcast(type, data) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// External projects: a clicked .tex file opened from Finder. The "project dir"
+// is the file's OWN folder, so relative \input / \includegraphics / .bib all
+// resolve and we never copy a (possibly huge) source folder.
+//   id -> { dir, mainFile, name }
+const externalProjects = new Map();
+
 async function getProjectDir(id) {
+  if (externalProjects.has(id)) return externalProjects.get(id).dir;
   const settings = await loadSettings();
   const baseDir  = settings.projectsDir || PROJECTS_DIR;
   return path.join(baseDir, id);
@@ -370,7 +377,7 @@ function sanitizePath(base, rel) {
   return full;
 }
 
-async function buildFileTree(dir, base) {
+async function buildFileTree(dir, base, depth = 0, maxDepth = Infinity) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const result  = [];
   for (const e of entries) {
@@ -378,7 +385,9 @@ async function buildFileTree(dir, base) {
     const abs = path.join(dir, e.name);
     const rel = path.relative(base, abs);
     if (e.isDirectory()) {
-      result.push({ name: e.name, path: rel, type: 'dir', children: await buildFileTree(abs, base) });
+      // Cap recursion for external projects (the folder may be e.g. ~/Downloads)
+      const children = depth < maxDepth ? await buildFileTree(abs, base, depth + 1, maxDepth) : [];
+      result.push({ name: e.name, path: rel, type: 'dir', children });
     } else {
       const stat = await fs.stat(abs);
       result.push({ name: e.name, path: rel, type: 'file', size: stat.size });
@@ -388,6 +397,56 @@ async function buildFileTree(dir, base) {
     if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+// ─── Title → filename ─────────────────────────────────────────────────────────
+
+// Pull the article title out of a .tex source (\title{...}, brace-matched).
+function extractTitle(tex) {
+  if (!tex) return null;
+  // Strip comments (keep escaped \%).
+  const src = tex.replace(/(^|[^\\])%.*$/gm, '$1');
+  const m = src.match(/\\title\s*(?:\[[^\]]*\])?\s*\{/);
+  if (!m) return null;
+  let i = m.index + m[0].length, depth = 1, out = '';
+  while (i < src.length && depth > 0) {
+    const c = src[i];
+    if (c === '{') { depth++; out += c; }
+    else if (c === '}') { depth--; if (depth > 0) out += c; }
+    else out += c;
+    i++;
+  }
+  out = out
+    .replace(/\\\\(\[[^\]]*\])?/g, ' ')                  // \\ line breaks
+    .replace(/\\(thanks|footnote|texorpdfstring)\s*\{[^{}]*\}/g, ' ')
+    .replace(/\\[a-zA-Z]+\*?\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}/g, '$1') // \textbf{x}→x
+    .replace(/\\[a-zA-Z]+\*?/g, ' ')                     // bare commands
+    .replace(/[{}$~^]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return out || null;
+}
+
+// Make a string safe to use as a filename (cross-platform), capped in length.
+function sanitizeFilename(name) {
+  return (name || '')
+    .replace(/[\/\\:*?"<>|]/g, ' ')
+    .replace(/[\x00-\x1f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\.+$/, '')
+    .slice(0, 120)
+    .trim() || 'document';
+}
+
+// Desired output PDF name for a project: the \title, else the main file's base name.
+async function titledPdfName(dir, mainBase) {
+  let title = null;
+  try {
+    const texPath = path.join(dir, `${mainBase}.tex`);
+    if (await fs.pathExists(texPath)) title = extractTitle(await fs.readFile(texPath, 'utf8'));
+  } catch {}
+  return `${title ? sanitizeFilename(title) : mainBase}.pdf`;
 }
 
 // ─── Routes: Status & Settings ───────────────────────────────────────────────
@@ -430,6 +489,39 @@ app.get('/api/projects', async (req, res) => {
   }
   projects.sort((a, b) => new Date(b.modified) - new Date(a.modified));
   res.json(projects);
+});
+
+// Open an arbitrary .tex file from disk (Finder "Open With" / right-click).
+// Registers its folder as an external project and reports a suggested engine.
+app.post('/api/open-external', async (req, res) => {
+  try {
+    let p = req.body.path;
+    if (!p) return res.status(400).json({ error: 'No path given' });
+    p = path.resolve(p);
+    if (!await fs.pathExists(p))           return res.status(404).json({ error: 'File not found' });
+    if (!/\.tex$/i.test(p))                return res.status(400).json({ error: 'Not a .tex file' });
+    const stat = await fs.stat(p);
+    if (stat.isDirectory())               return res.status(400).json({ error: 'Is a directory' });
+
+    const dir      = path.dirname(p);
+    const mainFile = path.basename(p);
+    // Stable id per absolute path so reopening the same file reuses the project.
+    const id = 'ext-' + Buffer.from(p).toString('base64').replace(/[^a-zA-Z0-9]/g, '');
+    externalProjects.set(id, { dir, mainFile, name: mainFile });
+
+    // Sniff for engines that need XeLaTeX (Unicode / fontspec / CJK / Greek).
+    let suggestedEngine = 'pdflatex';
+    try {
+      const head = (await fs.readFile(p, 'utf8')).slice(0, 8000);
+      if (/\\usepackage(\[[^\]]*\])?\{(fontspec|polyglossia|xeCJK|unicode-math)\}|\\setmainfont|\\setCJKmainfont/.test(head)) {
+        suggestedEngine = 'xelatex';
+      }
+    } catch {}
+
+    res.json({ id, name: mainFile, mainFile, dir, suggestedEngine, external: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/projects', async (req, res) => {
@@ -485,7 +577,9 @@ app.delete('/api/projects/:id', async (req, res) => {
 app.get('/api/projects/:id/files', async (req, res) => {
   const dir = await getProjectDir(req.params.id);
   if (!await fs.pathExists(dir)) return res.status(404).json({ error: 'Not found' });
-  const tree = await buildFileTree(dir, dir);
+  // External projects live in the user's own folder — list only the top level.
+  const maxDepth = externalProjects.has(req.params.id) ? 1 : Infinity;
+  const tree = await buildFileTree(dir, dir, 0, maxDepth);
   res.json(tree);
 });
 
@@ -578,7 +672,7 @@ app.post('/api/projects/:id/compile', async (req, res) => {
   const engineName  = req.body.engine || meta.engine || settings.defaultEngine || 'pdflatex';
   const engines     = settings.engines || await detectEngines();
   const enginePath  = engines[engineName] || engineName;
-  const mainFile    = req.body.mainFile || 'main.tex';
+  const mainFile    = req.body.mainFile || externalProjects.get(id)?.mainFile || 'main.tex';
   const outputDir   = path.join(dir, '.output');
   const runBibtex   = req.body.bibtex !== false;
 
@@ -681,7 +775,21 @@ app.post('/api/projects/:id/compile', async (req, res) => {
     await fs.writeFile(logPath, fullLog, 'utf8');
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    const hasPdf   = await fs.pathExists(path.join(outputDir, mainFile.replace('.tex', '.pdf')));
+    const builtPdf = path.join(outputDir, mainFile.replace('.tex', '.pdf'));
+    const hasPdf   = await fs.pathExists(builtPdf);
+
+    // Place a copy named after the article \title in the .tex file's own folder.
+    // Done whenever a PDF was produced, even with non-fatal errors/warnings.
+    let namedPdf = null;
+    if (hasPdf) {
+      try {
+        namedPdf = await titledPdfName(dir, mainFile.replace('.tex', ''));
+        await fs.copy(builtPdf, path.join(dir, namedPdf), { overwrite: true });
+        logLine(`[Dark Underleaf] PDF saved as “${namedPdf}” in the document folder.`);
+      } catch (e) {
+        logLine(`[Dark Underleaf] Could not write named PDF: ${e.message}`);
+      }
+    }
 
     broadcast('compile:done', {
       projectId: id,
@@ -689,7 +797,8 @@ app.post('/api/projects/:id/compile', async (req, res) => {
       errors,
       warnings,
       duration,
-      pdfReady: hasPdf
+      pdfReady: hasPdf,
+      namedPdf
     });
 
     logLine(`\n[Dark Underleaf] Compilation ${hasPdf ? 'succeeded' : 'failed'} in ${duration}s — ${errors} errors, ${warnings} warnings`);
@@ -703,11 +812,14 @@ app.post('/api/projects/:id/compile', async (req, res) => {
 
 app.get('/api/projects/:id/pdf', async (req, res) => {
   const dir     = await getProjectDir(req.params.id);
-  const main    = req.query.file || 'main';
+  const ext     = externalProjects.get(req.params.id);
+  const main    = req.query.file || (ext ? ext.mainFile.replace(/\.tex$/i, '') : 'main');
   const pdfPath = path.join(dir, '.output', `${main}.pdf`);
   if (!await fs.pathExists(pdfPath)) return res.status(404).end();
+  const downloadName = await titledPdfName(dir, main);
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Content-Disposition', `inline; filename="${downloadName.replace(/"/g, '')}"`);
   fs.createReadStream(pdfPath).pipe(res);
 });
 
