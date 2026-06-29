@@ -449,11 +449,59 @@ async function titledPdfName(dir, mainBase) {
   return `${title ? sanitizeFilename(title) : mainBase}.pdf`;
 }
 
+// ─── External project helpers ─────────────────────────────────────────────────
+
+// Register a .tex file's folder as an external project. Returns the payload the
+// renderer needs to open + compile it. `displayName` overrides the project name
+// (used when opening a whole folder, so the folder name shows instead of file).
+async function registerExternalTex(p, displayName) {
+  p = path.resolve(p);
+  const dir      = path.dirname(p);
+  const mainFile = path.basename(p);
+  const id = 'ext-' + Buffer.from(p).toString('base64').replace(/[^a-zA-Z0-9]/g, '');
+  const name = displayName || mainFile;
+  externalProjects.set(id, { dir, mainFile, name });
+
+  let suggestedEngine = 'pdflatex';
+  try {
+    const head = (await fs.readFile(p, 'utf8')).slice(0, 8000);
+    if (/\\usepackage(\[[^\]]*\])?\{(fontspec|polyglossia|xeCJK|unicode-math)\}|\\setmainfont|\\setCJKmainfont/.test(head)) {
+      suggestedEngine = 'xelatex';
+    }
+  } catch {}
+
+  return { id, name, mainFile, dir, suggestedEngine, external: true };
+}
+
+// Choose the most likely root .tex in a folder: prefer main.tex/cv.tex, then any
+// file with \documentclass + \begin{document}, de-prioritising Overleaf "__copy"
+// duplicates and longer names.
+async function pickMainTex(dir) {
+  let entries;
+  try { entries = await fs.readdir(dir); } catch { return null; }
+  const texs = entries.filter(f => /\.tex$/i.test(f));
+  if (!texs.length) return null;
+  const scored = [];
+  for (const t of texs) {
+    let body = '';
+    try { body = await fs.readFile(path.join(dir, t), 'utf8'); } catch {}
+    const isRoot = /\\documentclass/.test(body) && /\\begin\{document\}/.test(body);
+    const dup    = /__[A-Za-z0-9]+(_\d+)?\.tex$/i.test(t);
+    const pref   = /^(main|cv|thesis|paper)\.tex$/i.test(t);
+    scored.push({ t, score: [pref ? 0 : 1, isRoot ? 0 : 1, dup ? 1 : 0, t.length] });
+  }
+  scored.sort((a, b) => {
+    for (let i = 0; i < a.score.length; i++) if (a.score[i] !== b.score[i]) return a.score[i] - b.score[i];
+    return a.t.localeCompare(b.t);
+  });
+  return scored[0].t;
+}
+
 // ─── Routes: Status & Settings ───────────────────────────────────────────────
 
 app.get('/api/status', async (req, res) => {
   const settings = await loadSettings();
-  res.json({ ok: true, version: '1.0.0', settings });
+  res.json({ ok: true, version: '1.0.1', settings });
 });
 
 app.get('/api/detect-latex', async (req, res) => {
@@ -492,33 +540,78 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // Open an arbitrary .tex file from disk (Finder "Open With" / right-click).
-// Registers its folder as an external project and reports a suggested engine.
 app.post('/api/open-external', async (req, res) => {
   try {
     let p = req.body.path;
     if (!p) return res.status(400).json({ error: 'No path given' });
     p = path.resolve(p);
-    if (!await fs.pathExists(p))           return res.status(404).json({ error: 'File not found' });
-    if (!/\.tex$/i.test(p))                return res.status(400).json({ error: 'Not a .tex file' });
-    const stat = await fs.stat(p);
-    if (stat.isDirectory())               return res.status(400).json({ error: 'Is a directory' });
+    if (!await fs.pathExists(p)) return res.status(404).json({ error: 'File not found' });
+    if (!/\.tex$/i.test(p))      return res.status(400).json({ error: 'Not a .tex file' });
+    if ((await fs.stat(p)).isDirectory()) return res.status(400).json({ error: 'Is a directory' });
+    res.json(await registerExternalTex(p));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    const dir      = path.dirname(p);
-    const mainFile = path.basename(p);
-    // Stable id per absolute path so reopening the same file reuses the project.
-    const id = 'ext-' + Buffer.from(p).toString('base64').replace(/[^a-zA-Z0-9]/g, '');
-    externalProjects.set(id, { dir, mainFile, name: mainFile });
+// Open a whole folder as a project (picks the root .tex inside it).
+app.post('/api/open-folder', async (req, res) => {
+  try {
+    let d = req.body.path;
+    if (!d) return res.status(400).json({ error: 'No path given' });
+    d = path.resolve(d);
+    const st = await fs.stat(d).catch(() => null);
+    if (!st || !st.isDirectory()) return res.status(400).json({ error: 'Not a folder' });
+    const main = await pickMainTex(d);
+    if (!main) return res.status(404).json({ error: 'No .tex file found in that folder' });
+    res.json(await registerExternalTex(path.join(d, main), path.basename(d)));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    // Sniff for engines that need XeLaTeX (Unicode / fontspec / CJK / Greek).
-    let suggestedEngine = 'pdflatex';
-    try {
-      const head = (await fs.readFile(p, 'utf8')).slice(0, 8000);
-      if (/\\usepackage(\[[^\]]*\])?\{(fontspec|polyglossia|xeCJK|unicode-math)\}|\\setmainfont|\\setCJKmainfont/.test(head)) {
-        suggestedEngine = 'xelatex';
-      }
-    } catch {}
+// Open whatever was dropped from Finder: a .tex file, or a folder, or an asset.
+app.post('/api/open-path', async (req, res) => {
+  try {
+    let p = req.body.path;
+    if (!p) return res.status(400).json({ error: 'No path given' });
+    p = path.resolve(p);
+    const st = await fs.stat(p).catch(() => null);
+    if (!st) return res.status(404).json({ error: 'Not found' });
+    if (st.isDirectory()) {
+      const main = await pickMainTex(p);
+      if (!main) return res.json({ kind: 'folder-no-tex', dir: p, name: path.basename(p) });
+      return res.json({ kind: 'project', ...(await registerExternalTex(path.join(p, main), path.basename(p))) });
+    }
+    if (/\.tex$/i.test(p)) return res.json({ kind: 'project', ...(await registerExternalTex(p)) });
+    return res.json({ kind: 'asset', path: p, name: path.basename(p) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    res.json({ id, name: mainFile, mainFile, dir, suggestedEngine, external: true });
+// Create a brand-new project folder at a chosen location, then open it.
+app.post('/api/new-project-at', async (req, res) => {
+  try {
+    const parent = req.body.parentDir && path.resolve(req.body.parentDir);
+    const rawName = (req.body.name || '').trim();
+    const template = req.body.template || 'article';
+    if (!parent) return res.status(400).json({ error: 'No location given' });
+    if (!rawName) return res.status(400).json({ error: 'No project name' });
+    const pst = await fs.stat(parent).catch(() => null);
+    if (!pst || !pst.isDirectory()) return res.status(400).json({ error: 'Location is not a folder' });
+
+    const folderName = sanitizeFilename(rawName).replace(/\.+/g, ' ').trim() || 'project';
+    const projDir = path.join(parent, folderName);
+    if (await fs.pathExists(projDir)) return res.status(409).json({ error: `“${folderName}” already exists here` });
+
+    await fs.ensureDir(projDir);
+    await fs.ensureDir(path.join(projDir, '.output'));
+    const tpl = TEMPLATES[template] || TEMPLATES.article;
+    for (const [fname, content] of Object.entries(tpl.files)) {
+      await fs.writeFile(path.join(projDir, fname), content, 'utf8');
+    }
+    res.json(await registerExternalTex(path.join(projDir, 'main.tex'), folderName));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

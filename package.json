@@ -1,6 +1,6 @@
 {
   "name": "underleaf",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Underleaf — Local LaTeX IDE by Iannis Bardakos",
   "author": "Iannis Bardakos",
   "license": "MIT",
@@ -43,6 +43,7 @@
     ],
     "files": [
       "electron-main.js",
+      "preload.js",
       "server.js",
       "ai.js",
       "public/**/*",

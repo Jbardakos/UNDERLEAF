@@ -733,7 +733,10 @@ kbd {
   <aside id="sidebar">
     <div class="sb-sec projects">
       <div class="sb-head">Projects
-        <div class="sb-acts"><button onclick="showNewProject()" title="New project">+</button></div>
+        <div class="sb-acts">
+          <button onclick="openFolderAsProject()" title="Open a folder as project">📂</button>
+          <button onclick="showNewProject()" title="New project">+</button>
+        </div>
       </div>
       <div class="sb-scroll" id="project-list">
         <div style="padding:10px;color:var(--mid);font-size:10px;text-align:center">Loading…</div>
@@ -866,6 +869,13 @@ kbd {
   <div class="md">
     <h2>NEW PROJECT</h2>
     <div class="mr"><label>Name</label><input type="text" id="np-name" placeholder="My Document"></div>
+    <div class="mr"><label>Location</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="text" id="np-location" readonly placeholder="Default: ~/dark-underleaf/projects" style="flex:1;cursor:default">
+        <button class="btn btn-g" style="white-space:nowrap" onclick="chooseNewProjectLocation()">Choose…</button>
+        <button class="btn btn-g" title="Use default location" onclick="document.getElementById('np-location').value=''">Default</button>
+      </div>
+    </div>
     <div class="mr"><label>Template</label>
       <div class="tg">
         <div class="tc sel" data-tpl="article" onclick="selTpl(this)"><div class="tn">Article</div><div class="td">Academic article</div></div>
@@ -2128,9 +2138,44 @@ function selTpl(el) { document.querySelectorAll('.tc').forEach(c => c.classList.
 
 async function createProject() {
   const name = document.getElementById('np-name').value.trim(); if (!name) return;
-  const proj = await api('POST', '/api/projects', { name, template: S.selectedTpl });
-  closeMo('m-new-proj'); document.getElementById('np-name').value = '';
-  await loadProjects(); openProject(proj.id);
+  const location = document.getElementById('np-location')?.value.trim();
+  try {
+    if (location) {
+      // Create the project as a real folder at the chosen location, then open it.
+      const data = await api('POST', '/api/new-project-at', { parentDir: location, name, template: S.selectedTpl });
+      closeMo('m-new-proj');
+      document.getElementById('np-name').value = '';
+      document.getElementById('np-location').value = '';
+      await openExternalProject(data);
+    } else {
+      const proj = await api('POST', '/api/projects', { name, template: S.selectedTpl });
+      closeMo('m-new-proj');
+      document.getElementById('np-name').value = '';
+      await loadProjects(); openProject(proj.id);
+    }
+  } catch (e) {
+    toast(e.message || 'Could not create project', 'error');
+  }
+}
+
+// Choose where a new project folder should be created (native dialog).
+async function chooseNewProjectLocation() {
+  if (!window.__UNDERLEAF_ELECTRON__) { toast('Choosing a location needs the desktop app', 'info'); return; }
+  const dir = await window.electronAPI.chooseFolder();
+  if (dir) document.getElementById('np-location').value = dir;
+}
+
+// Open any existing folder on disk as a project (picks the root .tex inside).
+async function openFolderAsProject() {
+  if (!window.__UNDERLEAF_ELECTRON__) { toast('Opening a folder needs the desktop app', 'info'); return; }
+  const dir = await window.electronAPI.chooseFolder();
+  if (!dir) return;
+  try {
+    const data = await api('POST', '/api/open-folder', { path: dir });
+    await openExternalProject(data);
+  } catch (e) {
+    toast(e.message || 'No .tex found in that folder', 'error', 4000);
+  }
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────
@@ -3221,70 +3266,70 @@ async function showSettings() {
   if (el) el.textContent = cur || '(default: ~/dark-underleaf/projects)';
 }
 
-// ─── Drag & Drop images into file tree ────────────────────────────────
+// ─── Drag & Drop from Finder ──────────────────────────────────────────
+// Drop a .tex file or a folder anywhere → open it as a project.
+// Drop images / other files onto an open project → import them.
+
+async function importAssetsIntoProject(files) {
+  if (!S.projectId) return 0;
+  let uploaded = 0;
+  for (const file of files) {
+    try {
+      const existing = S.fileTree?.find?.(n => n.name === file.name);
+      if (existing && !confirm(`"${file.name}" already exists. Replace it?`)) continue;
+      const reader = new FileReader();
+      const b64 = await new Promise((res, rej) => {
+        reader.onload = () => res(reader.result.split(',')[1]);
+        reader.onerror = rej;
+        reader.readAsDataURL(file);
+      });
+      await api('POST', `/api/projects/${S.projectId}/upload`, { filename: file.name, data: b64, mime: file.type });
+      uploaded++;
+    } catch (err) { toast(`Failed to import ${file.name}: ${err.message}`, 'error'); }
+  }
+  if (uploaded) { toast(`Imported ${uploaded} file${uploaded > 1 ? 's' : ''}`, 'success'); await loadFileTree(); }
+  return uploaded;
+}
 
 (function setupDragDrop() {
-  const sidebar = document.querySelector('.sidebar') || document.getElementById('sidebar');
-  if (!sidebar) return;
   const zone = document.getElementById('filetree-dropzone');
-
+  if (zone) {
+    const hint = zone.querySelector('span');
+    if (hint) hint.textContent = '⬇ Drop a .tex, a folder, or images';
+  }
   let dragCounter = 0;
+  const showZone = () => { if (zone) zone.style.display = 'flex'; };
+  const hideZone = () => { if (zone) zone.style.display = 'none'; };
 
-  sidebar.addEventListener('dragenter', e => {
-    if (!S.projectId) return;
-    const hasFiles = e.dataTransfer?.types?.includes('Files');
-    if (!hasFiles) return;
-    e.preventDefault(); dragCounter++;
-    if (zone) zone.style.display = 'flex';
+  window.addEventListener('dragenter', e => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault(); dragCounter++; showZone();
   });
-
-  sidebar.addEventListener('dragleave', e => {
-    dragCounter--;
-    if (dragCounter <= 0) { dragCounter = 0; if (zone) zone.style.display = 'none'; }
+  window.addEventListener('dragover', e => {
+    if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
   });
+  window.addEventListener('dragleave', () => { if (--dragCounter <= 0) { dragCounter = 0; hideZone(); } });
 
-  sidebar.addEventListener('dragover', e => { e.preventDefault(); });
-
-  sidebar.addEventListener('drop', async e => {
-    e.preventDefault(); dragCounter = 0;
-    if (zone) zone.style.display = 'none';
-    if (!S.projectId) { toast('Open a project first', 'info'); return; }
-
+  window.addEventListener('drop', async e => {
+    e.preventDefault(); dragCounter = 0; hideZone();
     const files = Array.from(e.dataTransfer?.files || []);
-    const images = files.filter(f => f.type.startsWith('image/'));
-    const others = files.filter(f => !f.type.startsWith('image/'));
+    if (!files.length) return;
 
-    if (!images.length && !others.length) return;
-
-    const all = [...images, ...others];
-    let uploaded = 0;
-
-    for (const file of all) {
+    // Resolve the first item's absolute path (Electron). Let the server decide
+    // whether it's a .tex, a folder, or an importable asset.
+    const firstPath = (window.electronAPI?.pathForFile?.(files[0])) || files[0].path || '';
+    if (firstPath) {
       try {
-        // Check if file already exists in tree
-        const existing = S.fileTree?.find?.(n => n.name === file.name);
-        if (existing) {
-          if (!confirm(`"${file.name}" already exists. Replace it?`)) continue;
-        }
-        const reader = new FileReader();
-        const b64 = await new Promise((res, rej) => {
-          reader.onload = () => res(reader.result.split(',')[1]);
-          reader.onerror = rej;
-          reader.readAsDataURL(file);
-        });
-        await api('POST', `/api/projects/${S.projectId}/upload`, {
-          filename: file.name, data: b64, mime: file.type
-        });
-        uploaded++;
-      } catch(err) {
-        toast(`Failed to upload ${file.name}: ${err.message}`, 'error');
-      }
+        const data = await api('POST', '/api/open-path', { path: firstPath });
+        if (data.kind === 'project')        { await openExternalProject(data); return; }
+        if (data.kind === 'folder-no-tex')  { toast(`No .tex file in “${data.name}”`, 'info', 4000); return; }
+        // kind === 'asset' → fall through to import below
+      } catch (err) { toast(err.message || 'Could not open that item', 'error'); return; }
     }
 
-    if (uploaded > 0) {
-      toast(`Uploaded ${uploaded} file${uploaded>1?'s':''}`, 'success');
-      await loadFileTree();
-    }
+    // Import dropped assets into the current project.
+    if (!S.projectId) { toast('Open a project first, or drop a .tex / folder to open one', 'info', 4000); return; }
+    await importAssetsIntoProject(files);
   });
 })();
 

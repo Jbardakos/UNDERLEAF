@@ -3,9 +3,30 @@
  * Embeds the Express server, opens a desktop window
  */
 
-const { app, BrowserWindow, Menu, shell, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, nativeImage, ipcMain } = require('electron');
 const path = require('path');
 const http = require('http');
+
+// ─── Native dialogs / Finder (called from the renderer via preload) ──────────
+
+ipcMain.handle('choose-folder', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open or create a project folder',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
+});
+
+ipcMain.handle('choose-tex', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open a .tex file',
+    properties: ['openFile'],
+    filters: [{ name: 'LaTeX', extensions: ['tex'] }],
+  });
+  return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
+});
+
+ipcMain.handle('open-in-finder', (_e, p) => { if (p) shell.openPath(p); });
 
 // ─── Port negotiation ────────────────────────────────────────────────────────
 
@@ -152,6 +173,7 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
 
