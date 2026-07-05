@@ -3,6 +3,7 @@ name: Build Underleaf
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:   # lets you trigger manually from GitHub website
 
 jobs:
@@ -20,7 +21,7 @@ jobs:
         run: npm install
 
       - name: Build Mac DMG
-        run: npm run build:mac
+        run: npm run build:mac -- --publish never
 
       - name: Upload Mac artifacts
         uses: actions/upload-artifact@v4
@@ -41,7 +42,7 @@ jobs:
         run: npm install
 
       - name: Build Windows installer
-        run: npm run build:win
+        run: npm run build:win -- --publish never
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -50,3 +51,33 @@ jobs:
           path: |
             dist/*.exe
             dist/*.msi
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-mac, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.dmg
+            artifacts/*.exe
+            artifacts/*.msi
+          body: |
+            ## Underleaf ${{ github.ref_name }}
+
+            Local LaTeX IDE. Download the installer for your platform below.
+
+            - macOS: `.dmg`
+            - Windows: `.exe`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
